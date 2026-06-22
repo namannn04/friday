@@ -2,25 +2,58 @@
   "name": "friday",
   "version": "0.1.0",
   "private": true,
+  "main": "dist-electron/main.js",
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
+    "dev": "concurrently -k \"npm run dev:next\" \"npm run dev:electron\"",
+    "dev:next": "next dev",
+    "dev:electron": "npm run build:electron && wait-on http://localhost:3000 && electron . --no-sandbox --disable-http-cache",
+    "build:electron": "node scripts/build-electron.mjs",
+    "build": "next build && npm run build:electron",
+    "start": "electron . --no-sandbox",
     "lint": "eslint"
   },
   "dependencies": {
+    "audio-decode": "^3.10.2",
+    "concurrently": "^10.0.3",
+    "duck-duck-scrape": "^2.2.7",
+    "electron": "^42.4.1",
     "next": "16.2.9",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "uuid": "^14.0.0",
+    "vosk": "^0.3.39",
+    "wait-on": "^9.0.10"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.25.12",
     "eslint": "^9",
     "eslint-config-next": "16.2.9",
     "tailwindcss": "^4",
+    "tsx": "^4.22.4",
     "typescript": "^5"
+  },
+  "build": {
+    "appId": "com.friday.assistant",
+    "productName": "FRIDAY Assistant",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist-electron/**/*",
+      "out/**/*",
+      "package.json"
+    ],
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Utility"
+    }
   }
 }
