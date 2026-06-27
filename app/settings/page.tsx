@@ -133,10 +133,18 @@ export default function SettingsPage() {
             <label className="flex items-center gap-2">
               <input
                 type="checkbox"
+                checked={settings.conversationMode ?? true}
+                onChange={(e) => setSettings({ ...settings, conversationMode: e.target.checked })}
+              />
+              Conversation mode (human-like chat + auto voice reply)
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
                 checked={settings.voiceAutoSpeak}
                 onChange={(e) => setSettings({ ...settings, voiceAutoSpeak: e.target.checked })}
               />
-              Auto-speak responses (browser TTS)
+              Auto-speak typed command responses
             </label>
             <label className="block">
               TTS Rate: {settings.ttsRate}

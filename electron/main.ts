@@ -4,7 +4,8 @@ import { clearLogs, getLogs } from "../lib/logger";
 import { processCommand } from "../lib/orchestrator";
 import { checkOllamaStatus } from "../services/ai";
 import { loadSettings, saveSettings, updateSettings } from "../lib/settings";
-import { transcribeAudioBuffer } from "../services/speech/vosk-stt";
+import { transcribePcm16, resetVoskEngine } from "../services/speech/vosk-stt";
+import { speakOnLinux } from "../services/speech/tts-linux";
 import { getToolDefinitions } from "../tools/registry";
 
 const isDev = !app.isPackaged;
@@ -24,14 +25,6 @@ function setupMediaPermissions(): void {
   session.defaultSession.setPermissionCheckHandler((_webContents, permission) => {
     return allow.has(permission) || permission.startsWith("audio");
   });
-}
-
-function normalizeAudioBuffer(data: ArrayBuffer | Uint8Array | Buffer): ArrayBuffer {
-  if (data instanceof ArrayBuffer) return data;
-  if (Buffer.isBuffer(data)) {
-    return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
-  }
-  return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
 }
 
 function createWindow(): void {
@@ -110,16 +103,27 @@ function registerIpcHandlers(): void {
     return false;
   });
 
-  ipcMain.handle("voice:transcribe", async (_event, audioBuffer: ArrayBuffer | Uint8Array | Buffer) => {
+  ipcMain.handle("voice:transcribe-pcm", async (_event, pcmBuffer: ArrayBuffer | Buffer) => {
     try {
-      const normalized = normalizeAudioBuffer(audioBuffer);
-      return await transcribeAudioBuffer(normalized);
+      const buf = Buffer.isBuffer(pcmBuffer) ? pcmBuffer : Buffer.from(pcmBuffer);
+      return await transcribePcm16(buf, 16000);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Transcription failed";
       return { text: "", error: message };
     }
   });
+
+  ipcMain.handle("tts:speak", async (_event, text: string) => {
+    if (process.platform === "linux") {
+      return speakOnLinux(text);
+    }
+    return false;
+  });
 }
+
+app.on("before-quit", () => {
+  resetVoskEngine();
+});
 
 app.whenReady().then(() => {
   setupMediaPermissions();

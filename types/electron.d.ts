@@ -15,8 +15,8 @@ export interface ElectronAPI {
   clearLogs: () => Promise<void>;
   getSystemStatus: () => Promise<SystemStatus>;
   getTools: () => Promise<ToolDefinition[]>;
-  speak: (text: string) => Promise<void>;
-  transcribeAudio: (audioBuffer: ArrayBuffer) => Promise<{ text: string; error?: string }>;
+  speak: (text: string) => Promise<boolean>;
+  transcribePcm: (pcmBuffer: ArrayBuffer) => Promise<{ text: string; error?: string }>;
   platform: string;
 }
 

@@ -1,7 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { initSpeech, speakResponse, stopSpeaking } from "@/lib/speech/tts-client";
 import type { AppSettings, SystemStatus, ToolDefinition } from "@/types";
+
+export { speakResponse, stopSpeaking, initSpeech };
 
 export function useElectron() {
   const [ready, setReady] = useState(false);
@@ -9,6 +12,7 @@ export function useElectron() {
 
   useEffect(() => {
     setIsElectron(typeof window !== "undefined" && !!window.electronAPI);
+    initSpeech();
     setReady(true);
   }, []);
 
@@ -22,7 +26,8 @@ export function useElectron() {
       safetyMode: "strict",
       voiceEnabled: true,
       voiceAutoSpeak: true,
-      ttsRate: 1,
+      conversationMode: true,
+      ttsRate: 0.92,
     };
   }, []);
 
@@ -43,18 +48,4 @@ export function useElectron() {
   }, []);
 
   return { ready, isElectron, getSettings, getSystemStatus, getTools };
-}
-
-export function speakText(text: string, rate = 1): void {
-  if (typeof window === "undefined" || !window.speechSynthesis) return;
-  window.speechSynthesis.cancel();
-  const utterance = new SpeechSynthesisUtterance(text);
-  utterance.rate = rate;
-  window.speechSynthesis.speak(utterance);
-}
-
-export function stopSpeaking(): void {
-  if (typeof window !== "undefined" && window.speechSynthesis) {
-    window.speechSynthesis.cancel();
-  }
 }

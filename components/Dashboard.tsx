@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { ConfirmationModal } from "@/components/ConfirmationModal";
 import { CommandHistory } from "@/components/CommandHistory";
 import { LogsViewer } from "@/components/LogsViewer";
@@ -9,8 +9,9 @@ import { ResponsePanel } from "@/components/ResponsePanel";
 import { SystemStatusPanel } from "@/components/SystemStatus";
 import { ToolsList } from "@/components/ToolsList";
 import { VoiceButton } from "@/components/VoiceButton";
-import { speakText, useElectron } from "@/lib/hooks/useElectron";
+import { useElectron } from "@/lib/hooks/useElectron";
 import { useVoiceInput } from "@/lib/hooks/useVoiceInput";
+import { speakResponse } from "@/lib/speech/tts-client";
 import type { ActionLogEntry, AppSettings, CommandResponse, SystemStatus, ToolDefinition } from "@/types";
 
 export function Dashboard() {
@@ -33,6 +34,20 @@ export function Dashboard() {
   const [confirmRisk, setConfirmRisk] = useState<string | undefined>();
   const [existingFile, setExistingFile] = useState(false);
   const [lastCommand, setLastCommand] = useState("");
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const settingsRef = useRef<AppSettings | null>(null);
+  settingsRef.current = settings;
+
+  const sayAloud = useCallback(async (text: string) => {
+    const s = settingsRef.current;
+    if (!text || s?.voiceEnabled === false) return;
+    setIsSpeaking(true);
+    try {
+      await speakResponse(text, s);
+    } finally {
+      setTimeout(() => setIsSpeaking(false), 500);
+    }
+  }, []);
 
   const refreshMeta = useCallback(async () => {
     const [s, t, l] = await Promise.all([
@@ -68,18 +83,30 @@ export function Dashboard() {
         setExistingFile(res.finalMessage.includes("already exists"));
         setLastCommand(cmd);
         setConfirmOpen(true);
-        return;
       }
 
-      if (settings?.voiceAutoSpeak && res.finalMessage) {
-        speakText(res.finalMessage, settings.ttsRate);
+      const toSpeak = res.speakMessage || res.finalMessage;
+      if (res.voiceSpoken) {
+        setIsSpeaking(true);
+        setTimeout(() => setIsSpeaking(false), 3000);
+      } else if (toSpeak && res.status !== "clarification") {
+        void sayAloud(toSpeak);
       }
     },
-    [refreshMeta, settings]
+    [refreshMeta, sayAloud]
   );
 
   const runCommand = useCallback(
-    async (text: string, options?: { confirmed?: boolean; pendingActionId?: string; writeMode?: "append" | "rename" | "cancel"; newFileName?: string }) => {
+    async (
+      text: string,
+      options?: {
+        confirmed?: boolean;
+        pendingActionId?: string;
+        writeMode?: "append" | "rename" | "cancel";
+        newFileName?: string;
+        fromVoice?: boolean;
+      }
+    ) => {
       if (!window.electronAPI) {
         setResponse({
           id: "browser",
@@ -99,6 +126,7 @@ export function Dashboard() {
           pendingActionId: options?.pendingActionId,
           writeMode: options?.writeMode,
           newFileName: options?.newFileName,
+          fromVoice: options?.fromVoice,
         });
         handleResponse(res, text);
       } finally {
@@ -119,30 +147,33 @@ export function Dashboard() {
 
   const [voiceProgress, setVoiceProgress] = useState<string | null>(null);
 
-  const handleVoiceResult = useCallback((text: string) => {
-    setVoiceDraft(text);
-    setCommand(text);
-    setVoiceProgress(null);
-    setResponse({
-      id: "voice-ok",
-      command: text,
-      finalMessage: `Voice recognized: "${text}"`,
-      requiresConfirmation: false,
-      status: "completed",
-    });
-  }, []);
+  const handleVoiceResult = useCallback(
+    async (text: string) => {
+      setCommand(text);
+      setVoiceProgress(null);
+      setVoiceDraft(null);
+      setLastCommand(text);
+      await runCommand(text, { fromVoice: true });
+      setCommand("");
+    },
+    [runCommand]
+  );
 
-  const handleVoiceError = useCallback((err: string) => {
-    setVoiceProgress(null);
-    setResponse({
-      id: "voice-error",
-      command: "",
-      finalMessage: `Voice error: ${err}`,
-      requiresConfirmation: false,
-      status: "error",
-      error: err,
-    });
-  }, []);
+  const handleVoiceError = useCallback(
+    (err: string) => {
+      setVoiceProgress(null);
+      setResponse({
+        id: "voice-error",
+        command: "",
+        finalMessage: `Voice error: ${err}`,
+        requiresConfirmation: false,
+        status: "error",
+        error: err,
+      });
+      void sayAloud("Sorry, I couldn't hear that. Please try again.");
+    },
+    [sayAloud]
+  );
 
   const voice = useVoiceInput({
     onResult: handleVoiceResult,
@@ -236,15 +267,27 @@ export function Dashboard() {
 
             {voice.recording && (
               <p className="mt-2 text-xs text-amber-300">
-                ● Recording… speak now, then click the mic again to stop.
+                ● Listening… speak naturally, then click mic again.
               </p>
             )}
 
             {voice.transcribing && (
-              <p className="mt-2 text-xs text-amber-300">
-                Transcribing offline… first use downloads a small speech model.
+              <p className="mt-2 text-xs text-cyan-300">Thinking…</p>
+            )}
+
+            {isSpeaking && (
+              <p className="mt-2 flex items-center gap-2 text-xs text-emerald-400">
+                <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-400" />
+                FRIDAY is speaking…
               </p>
             )}
+
+            {isElectron && (
+              <p className="mt-2 text-xs text-slate-500">
+                Mic: click → speak → click again. Typed or spoken — FRIDAY replies in voice.
+              </p>
+            )}
+
             {voiceDraft && (
               <div className="mt-3 flex items-center gap-2 rounded-lg border border-cyan-500/20 bg-black/20 p-3 text-sm">
                 <span className="text-slate-400">Voice:</span>

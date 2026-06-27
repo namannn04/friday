@@ -72,6 +72,7 @@ export interface AppSettings {
   safetyMode: "strict" | "normal";
   voiceEnabled: boolean;
   voiceAutoSpeak: boolean;
+  conversationMode: boolean;
   ttsRate: number;
 }
 
@@ -103,9 +104,11 @@ export interface CommandResponse {
   preview?: string;
   result?: ToolResult;
   finalMessage: string;
+  speakMessage?: string;
   error?: string;
   fromWebSearch?: boolean;
   status: "completed" | "pending_confirmation" | "error" | "clarification";
+  voiceSpoken?: boolean;
 }
 
 export interface ProcessCommandRequest {
@@ -114,4 +117,5 @@ export interface ProcessCommandRequest {
   pendingActionId?: string;
   writeMode?: "append" | "rename" | "cancel";
   newFileName?: string;
+  fromVoice?: boolean;
 }

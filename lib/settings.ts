@@ -26,7 +26,8 @@ export function getDefaultSettings(): AppSettings {
     safetyMode: "strict",
     voiceEnabled: true,
     voiceAutoSpeak: true,
-    ttsRate: 1,
+    conversationMode: true,
+    ttsRate: 0.92,
   };
 }
 
@@ -34,7 +35,14 @@ export function loadSettings(): AppSettings {
   try {
     if (fs.existsSync(SETTINGS_FILE)) {
       const raw = fs.readFileSync(SETTINGS_FILE, "utf-8");
-      return { ...getDefaultSettings(), ...JSON.parse(raw) };
+      const parsed = JSON.parse(raw) as Partial<AppSettings>;
+      return {
+        ...getDefaultSettings(),
+        ...parsed,
+        voiceEnabled: parsed.voiceEnabled ?? true,
+        voiceAutoSpeak: parsed.voiceAutoSpeak ?? true,
+        conversationMode: parsed.conversationMode ?? true,
+      };
     }
   } catch {
     // fall through to defaults

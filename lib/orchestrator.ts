@@ -12,20 +12,54 @@ import { validateActionPlan } from "@/lib/safety";
 import { loadSettings } from "@/lib/settings";
 import { parseLocalCommand } from "@/lib/command-parser";
 import { createAIProvider } from "@/services/ai";
+import { chatWithOllama, humanizeToolResult, isCasualConversation } from "@/services/ai/conversation";
 import { performWebSearch } from "@/services/search/web-search";
-import { answerQuestionTool, summarizeTextFileTool } from "@/tools/answer-question";
+import { summarizeTextFileTool } from "@/tools/answer-question";
 import { appendTextFileTool, createTextFileTool } from "@/tools/create-text-file";
 import { listFolderTool } from "@/tools/list-folder";
 import { openAppTool } from "@/tools/open-app";
 import { openFileTool } from "@/tools/open-file";
 import { searchFileTool } from "@/tools/search-file";
+import { prepareTextForSpeech } from "@/lib/speech/text-for-speech";
+import { speakOnLinux } from "@/services/speech/tts-linux";
 
 const pendingActions = new Map<string, PendingAction>();
+
+async function speakReply(settings: AppSettings, response: CommandResponse): Promise<CommandResponse> {
+  if (settings.voiceEnabled === false) {
+    return response;
+  }
+
+  const text = response.speakMessage || response.finalMessage;
+  if (!text || response.status === "clarification") {
+    return response;
+  }
+
+  const prepared = prepareTextForSpeech(text);
+  if (!prepared) {
+    return response;
+  }
+
+  try {
+    await speakOnLinux(prepared);
+    return { ...response, voiceSpoken: true };
+  } catch {
+    return response;
+  }
+}
 
 export async function processCommand(
   request: ProcessCommandRequest
 ): Promise<CommandResponse> {
   const settings = loadSettings();
+  const response = await executeProcessCommand(request, settings);
+  return speakReply(settings, response);
+}
+
+async function executeProcessCommand(
+  request: ProcessCommandRequest,
+  settings: AppSettings
+): Promise<CommandResponse> {
   const id = uuidv4();
   const command = request.command.trim();
 
@@ -42,6 +76,37 @@ export async function processCommand(
 
   if (request.pendingActionId && request.confirmed) {
     return executePendingAction(request.pendingActionId, request, settings, id);
+  }
+
+  const shouldHumanize = settings.conversationMode || request.fromVoice;
+
+  // Pure casual chat — no tools needed
+  if (isCasualConversation(command)) {
+    try {
+      const reply = await chatWithOllama(command, settings);
+      logAction({ command, tool: "answer_question", result: "success", message: "Casual conversation" });
+      return {
+        id,
+        command,
+        toolName: "answer_question",
+        interpretation: reply,
+        requiresConfirmation: false,
+        finalMessage: reply,
+        speakMessage: reply,
+        status: "completed",
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Chat failed";
+      return {
+        id,
+        command,
+        finalMessage: `I couldn't respond right now. ${message}`,
+        speakMessage: "Sorry, I couldn't respond right now. Is Ollama running?",
+        requiresConfirmation: false,
+        status: "error",
+        error: message,
+      };
+    }
   }
 
   let plan: AIActionPlan | null = parseLocalCommand(command);
@@ -75,6 +140,23 @@ export async function processCommand(
 
   if (!plan) {
     logAction({ command, result: "error", message: "Could not interpret command" });
+    // Fall back to conversational reply instead of dead-end clarification
+    if (settings.conversationMode) {
+      try {
+        const reply = await chatWithOllama(command, settings);
+        return {
+          id,
+          command,
+          toolName: "answer_question",
+          requiresConfirmation: false,
+          finalMessage: reply,
+          speakMessage: reply,
+          status: "completed",
+        };
+      } catch {
+        // fall through to examples
+      }
+    }
     return {
       id,
       command,
@@ -146,7 +228,7 @@ export async function processCommand(
     };
   }
 
-  const result = await executeTool(plan, settings);
+  const result = await executeTool(plan, settings, command);
   logAction({
     command,
     tool: plan.toolName,
@@ -155,6 +237,21 @@ export async function processCommand(
     result: result.success ? "success" : "error",
     message: result.message,
   });
+
+  let finalMessage = result.message;
+  let speakMessage = result.message;
+
+  if (result.success && shouldHumanize && plan.toolName !== "answer_question") {
+    try {
+      const human = await humanizeToolResult(command, result.message, settings);
+      finalMessage = human;
+      speakMessage = human;
+    } catch {
+      speakMessage = result.message;
+    }
+  } else if (result.success && plan.toolName === "answer_question") {
+    speakMessage = finalMessage;
+  }
 
   return {
     id,
@@ -165,7 +262,8 @@ export async function processCommand(
     requiresConfirmation: false,
     riskLevel: plan.riskLevel,
     result,
-    finalMessage: result.message,
+    finalMessage,
+    speakMessage,
     fromWebSearch: plan.toolName === "web_search",
     status: result.success ? "completed" : "error",
     error: result.success ? undefined : result.message,
@@ -226,7 +324,8 @@ async function executePendingAction(
     };
   }
 
-  const result = await executeTool(plan, settings);
+  const result = await executeTool(plan, settings, pending.command);
+  const shouldHumanize = settings.conversationMode || request.fromVoice;
 
   if (
     !result.success &&
@@ -265,6 +364,18 @@ async function executePendingAction(
     message: result.message,
   });
 
+  let finalMessage = result.message;
+  let speakMessage = result.message;
+  if (result.success && shouldHumanize) {
+    try {
+      const human = await humanizeToolResult(pending.command, result.message, settings);
+      finalMessage = human;
+      speakMessage = human;
+    } catch {
+      speakMessage = result.message;
+    }
+  }
+
   return {
     id,
     command: pending.command,
@@ -272,19 +383,32 @@ async function executePendingAction(
     toolName: plan.toolName,
     requiresConfirmation: false,
     result,
-    finalMessage: result.message,
+    finalMessage,
+    speakMessage,
     status: result.success ? "completed" : "error",
   };
 }
 
-async function executeTool(plan: AIActionPlan, settings: AppSettings): Promise<ToolResult> {
+async function executeTool(
+  plan: AIActionPlan,
+  settings: AppSettings,
+  originalCommand?: string
+): Promise<ToolResult> {
   switch (plan.toolName) {
     case "answer_question": {
-      const question = String(plan.args.question || plan.finalUserMessage || "");
+      const question = String(plan.args.question || originalCommand || plan.finalUserMessage || "");
       if (question.toLowerCase().includes("summarize") && plan.args.filePath) {
         return summarizeTextFileTool(plan, settings);
       }
-      return answerQuestionTool(plan);
+      try {
+        const reply = await chatWithOllama(question, settings);
+        return { success: true, message: reply, data: { question } };
+      } catch (error) {
+        return {
+          success: false,
+          message: error instanceof Error ? error.message : "Could not generate a reply.",
+        };
+      }
     }
     case "web_search":
       return performWebSearch(String(plan.args.query || plan.finalUserMessage));

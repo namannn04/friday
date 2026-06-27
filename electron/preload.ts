@@ -9,12 +9,9 @@ const electronAPI: ElectronAPI = {
   clearLogs: () => ipcRenderer.invoke("logs:clear"),
   getSystemStatus: () => ipcRenderer.invoke("system:status"),
   getTools: () => ipcRenderer.invoke("tools:get"),
-  speak: async (text: string) => {
-    // TTS handled in renderer via Web Speech API
-    return Promise.resolve();
-  },
-  transcribeAudio: (audioBuffer: ArrayBuffer) =>
-    ipcRenderer.invoke("voice:transcribe", audioBuffer),
+  speak: (text: string) => ipcRenderer.invoke("tts:speak", text),
+  transcribePcm: (pcmBuffer: ArrayBuffer) =>
+    ipcRenderer.invoke("voice:transcribe-pcm", Buffer.from(pcmBuffer)),
   platform: process.platform,
 };
 

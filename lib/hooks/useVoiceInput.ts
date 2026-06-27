@@ -8,60 +8,73 @@ interface UseVoiceInputOptions {
   onProgress?: (message: string | null) => void;
 }
 
-function pickRecorderMimeType(): string | undefined {
-  const candidates = [
-    "audio/webm;codecs=opus",
-    "audio/webm",
-    "audio/ogg;codecs=opus",
-    "audio/ogg",
-    "audio/mp4",
-  ];
-  for (const type of candidates) {
-    if (MediaRecorder.isTypeSupported(type)) return type;
+function floatToInt16(samples: Float32Array): Int16Array {
+  const out = new Int16Array(samples.length);
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
   }
-  return undefined;
+  return out;
+}
+
+function resampleTo16k(samples: Float32Array, sourceRate: number): Int16Array {
+  const targetRate = 16000;
+  if (Math.abs(sourceRate - targetRate) < 100) {
+    return floatToInt16(samples);
+  }
+  const ratio = sourceRate / targetRate;
+  const newLength = Math.round(samples.length / ratio);
+  const resampled = new Float32Array(newLength);
+  for (let i = 0; i < newLength; i++) {
+    resampled[i] = samples[Math.floor(i * ratio)] ?? 0;
+  }
+  return floatToInt16(resampled);
 }
 
 export function useVoiceInput({ onResult, onError, onProgress }: UseVoiceInputOptions) {
   const [recording, setRecording] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
   const [electronVoice, setElectronVoice] = useState(
-    () => typeof window !== "undefined" && !!window.electronAPI?.transcribeAudio
+    () => typeof window !== "undefined" && !!window.electronAPI?.transcribePcm
   );
 
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const chunksRef = useRef<Blob[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
-  const mimeTypeRef = useRef<string>("audio/webm");
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const framesRef = useRef<Float32Array[]>([]);
+  const sampleRateRef = useRef(48000);
+  const isCapturingRef = useRef(false);
 
   useEffect(() => {
-    setElectronVoice(!!window.electronAPI?.transcribeAudio);
+    setElectronVoice(!!window.electronAPI?.transcribePcm);
   }, []);
 
   const stopStream = useCallback(() => {
-    streamRef.current?.getTracks().forEach((track) => track.stop());
+    isCapturingRef.current = false;
+    processorRef.current?.disconnect();
+    processorRef.current = null;
+    streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
+    if (audioContextRef.current?.state !== "closed") {
+      void audioContextRef.current?.close();
+    }
+    audioContextRef.current = null;
   }, []);
 
-  const transcribeBlob = useCallback(
-    async (blob: Blob) => {
+  const transcribePcm = useCallback(
+    async (pcm: Int16Array) => {
       const api = window.electronAPI;
-      if (!api?.transcribeAudio) {
-        onError?.("Voice requires the FRIDAY desktop app (Electron).");
-        return;
-      }
-
-      if (blob.size < 500) {
-        onError?.("Recording too short. Click mic, speak 2–3 seconds, then click mic again.");
+      if (!api?.transcribePcm) {
+        onError?.("Restart the app: npm run dev — then use the FRIDAY desktop window.");
         return;
       }
 
       setTranscribing(true);
-      onProgress?.("Processing voice locally (first time may download ~40MB model)...");
+      onProgress?.("Understanding what you said…");
 
       try {
-        const buffer = await blob.arrayBuffer();
-        const result = await api.transcribeAudio(buffer);
+        const buffer = new Uint8Array(pcm).buffer;
+        const result = await api.transcribePcm(buffer);
 
         if (result.error) {
           onError?.(result.error);
@@ -80,92 +93,104 @@ export function useVoiceInput({ onResult, onError, onProgress }: UseVoiceInputOp
     [onError, onProgress, onResult]
   );
 
-  const stopRecording = useCallback(() => {
-    const recorder = mediaRecorderRef.current;
-    if (recorder && recorder.state !== "inactive") {
-      try {
-        recorder.requestData();
-      } catch {
-        // ignore if not supported
-      }
-      recorder.stop();
-    }
+  const stopRecording = useCallback(async () => {
     setRecording(false);
-  }, []);
+    isCapturingRef.current = false;
+
+    const frames = framesRef.current;
+    const rate = sampleRateRef.current;
+    framesRef.current = [];
+
+    stopStream();
+
+    if (frames.length === 0) {
+      onError?.("No audio captured. Allow microphone access and try again.");
+      return;
+    }
+
+    const total = frames.reduce((sum, f) => sum + f.length, 0);
+    const merged = new Float32Array(total);
+    let offset = 0;
+    for (const frame of frames) {
+      merged.set(frame, offset);
+      offset += frame.length;
+    }
+
+    const pcm = resampleTo16k(merged, rate);
+
+    // ~0.4s minimum at 16kHz
+    if (pcm.length < 6400) {
+      onError?.("Too short. Click mic, speak clearly for 2 seconds, click mic again.");
+      return;
+    }
+
+    await transcribePcm(pcm);
+  }, [onError, stopStream, transcribePcm]);
 
   const startRecording = useCallback(async () => {
     if (recording || transcribing) return;
 
     if (!navigator.mediaDevices?.getUserMedia) {
-      onError?.("Microphone API not available in this environment.");
+      onError?.("Microphone not available.");
       return;
     }
 
-    onProgress?.("Requesting microphone access...");
+    onProgress?.("Starting microphone…");
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
+          autoGainControl: true,
         },
       });
 
       streamRef.current = stream;
-      chunksRef.current = [];
+      framesRef.current = [];
 
-      const mimeType = pickRecorderMimeType();
-      mimeTypeRef.current = mimeType || "audio/webm";
+      const audioContext = new AudioContext();
+      audioContextRef.current = audioContext;
 
-      const recorder = mimeType
-        ? new MediaRecorder(stream, { mimeType })
-        : new MediaRecorder(stream);
+      // Required after user click — otherwise mic captures silence
+      if (audioContext.state === "suspended") {
+        await audioContext.resume();
+      }
 
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          chunksRef.current.push(event.data);
-        }
+      sampleRateRef.current = audioContext.sampleRate;
+
+      const source = audioContext.createMediaStreamSource(stream);
+      const processor = audioContext.createScriptProcessor(4096, 1, 1);
+      processorRef.current = processor;
+
+      isCapturingRef.current = true;
+
+      processor.onaudioprocess = (event) => {
+        if (!isCapturingRef.current) return;
+        framesRef.current.push(new Float32Array(event.inputBuffer.getChannelData(0)));
       };
 
-      recorder.onerror = () => {
-        stopStream();
-        setRecording(false);
-        onError?.("Recording failed. Check microphone permissions.");
-      };
+      source.connect(processor);
+      processor.connect(audioContext.destination);
 
-      recorder.onstop = async () => {
-        stopStream();
-        const blob = new Blob(chunksRef.current, { type: mimeTypeRef.current });
-        chunksRef.current = [];
-        mediaRecorderRef.current = null;
-        await transcribeBlob(blob);
-      };
-
-      mediaRecorderRef.current = recorder;
-      recorder.start(250);
       setRecording(true);
-      onProgress?.("Recording… click mic again when done speaking.");
+      onProgress?.("Speak now… click mic again when finished.");
     } catch (err) {
       stopStream();
-      setRecording(false);
       const name = err instanceof Error ? err.name : "";
-      const message = err instanceof Error ? err.message : "Microphone access denied";
-
       if (name === "NotAllowedError" || name === "PermissionDeniedError") {
-        onError?.("Microphone blocked. Allow mic access for FRIDAY in system settings.");
-      } else if (name === "NotFoundError") {
-        onError?.("No microphone found. Connect a mic and try again.");
+        onError?.("Microphone blocked. Allow mic for FRIDAY in system settings.");
       } else {
-        onError?.(message);
+        onError?.(err instanceof Error ? err.message : "Could not access microphone.");
       }
       onProgress?.(null);
     }
-  }, [onError, onProgress, recording, stopStream, transcribeBlob, transcribing]);
+  }, [onError, onProgress, recording, stopStream, transcribing]);
 
   const toggle = useCallback(() => {
     if (transcribing) return;
     if (recording) {
-      stopRecording();
+      void stopRecording();
     } else {
       void startRecording();
     }
@@ -174,7 +199,7 @@ export function useVoiceInput({ onResult, onError, onProgress }: UseVoiceInputOp
   return {
     recording,
     transcribing,
-    supported: electronVoice || !!navigator.mediaDevices?.getUserMedia,
+    supported: electronVoice,
     electronVoice,
     toggle,
     stopRecording,
