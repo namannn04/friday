@@ -105,11 +105,34 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle("voice:transcribe-pcm", async (_event, pcmBuffer: ArrayBuffer | Buffer) => {
     try {
+      // Ensure we have a proper Buffer
       const buf = Buffer.isBuffer(pcmBuffer) ? pcmBuffer : Buffer.from(pcmBuffer);
-      return await transcribePcm16(buf, 16000);
+      
+      console.log(`[Vosk IPC] Received ${buf.length} bytes for transcription`);
+      
+      // Validate buffer before processing
+      if (buf.length === 0) {
+        return { text: "", error: "Empty audio buffer received" };
+      }
+
+      if (buf.length % 2 !== 0) {
+        console.error("[Vosk IPC] Invalid buffer: odd number of bytes");
+        return { text: "", error: "Invalid audio format (corrupted buffer)" };
+      }
+
+      const result = await transcribePcm16(buf, 16000);
+      
+      if (result.error) {
+        console.error("[Vosk IPC] Transcription error:", result.error);
+      } else {
+        console.log("[Vosk IPC] Transcription success:", result.text);
+      }
+      
+      return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Transcription failed";
-      return { text: "", error: message };
+      console.error("[Vosk IPC] Exception:", message);
+      return { text: "", error: `Voice recognition crashed: ${message}` };
     }
   });
 

@@ -40,19 +40,39 @@ export async function chatWithOllama(
     { role: "user", content: userMessage },
   ];
 
-  const response = await fetch(`${settings.ollamaBaseUrl}/api/chat`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: settings.ollamaModel,
-      stream: false,
-      messages,
-    }),
-    signal: AbortSignal.timeout(90000),
-  });
+  let response;
+  try {
+    response = await fetch(`${settings.ollamaBaseUrl}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: settings.ollamaModel,
+        stream: false,
+        messages,
+        options: {
+          temperature: 0.8, // slightly more creative responses
+          num_predict: 150, // keep responses concise
+        },
+      }),
+      signal: AbortSignal.timeout(45000), // 45s timeout
+    });
+  } catch (error) {
+    if (error instanceof Error) {
+      if (error.name === "AbortError" || error.message.includes("timeout")) {
+        throw new Error("AI response timed out. The model may be too slow or overloaded.");
+      }
+      if (error.message.includes("fetch") || error.message.includes("ECONNREFUSED")) {
+        throw new Error("Can't reach Ollama. Start it with: ollama serve");
+      }
+    }
+    throw error;
+  }
 
   if (!response.ok) {
-    throw new Error(`Ollama chat error: ${response.status}`);
+    if (response.status === 404) {
+      throw new Error(`Model "${settings.ollamaModel}" not found. Install it: ollama pull ${settings.ollamaModel}`);
+    }
+    throw new Error(`Ollama error ${response.status}: ${response.statusText}`);
   }
 
   const data = (await response.json()) as { message?: { content?: string } };

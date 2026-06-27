@@ -26,12 +26,18 @@ import { speakOnLinux } from "@/services/speech/tts-linux";
 const pendingActions = new Map<string, PendingAction>();
 
 async function speakReply(settings: AppSettings, response: CommandResponse): Promise<CommandResponse> {
+  // Always speak if voiceEnabled (regardless of input method - text or voice)
   if (settings.voiceEnabled === false) {
     return response;
   }
 
+  // Don't speak clarifications (user needs to read options)
+  if (response.status === "clarification") {
+    return response;
+  }
+
   const text = response.speakMessage || response.finalMessage;
-  if (!text || response.status === "clarification") {
+  if (!text) {
     return response;
   }
 
@@ -41,9 +47,18 @@ async function speakReply(settings: AppSettings, response: CommandResponse): Pro
   }
 
   try {
-    await speakOnLinux(prepared);
-    return { ...response, voiceSpoken: true };
-  } catch {
+    // Set timeout to prevent TTS from blocking forever
+    const timeoutPromise = new Promise<boolean>((resolve) => {
+      setTimeout(() => resolve(false), 15000); // 15s max for speech
+    });
+
+    const speakPromise = speakOnLinux(prepared);
+    const success = await Promise.race([speakPromise, timeoutPromise]);
+
+    return { ...response, voiceSpoken: success };
+  } catch (error) {
+    // Log TTS errors but don't fail the command
+    console.error("[TTS]", error instanceof Error ? error.message : "Speech failed");
     return response;
   }
 }
@@ -97,11 +112,16 @@ async function executeProcessCommand(
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : "Chat failed";
+      const speakMessage = message.includes("Ollama") || message.includes("ollama")
+        ? "I can't reach my AI brain. Make sure Ollama is running."
+        : "Sorry, I couldn't respond right now.";
+      
+      logAction({ command, tool: "answer_question", result: "error", message });
       return {
         id,
         command,
-        finalMessage: `I couldn't respond right now. ${message}`,
-        speakMessage: "Sorry, I couldn't respond right now. Is Ollama running?",
+        finalMessage: `I couldn't respond: ${message}`,
+        speakMessage,
         requiresConfirmation: false,
         status: "error",
         error: message,

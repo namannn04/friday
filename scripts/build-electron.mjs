@@ -1,4 +1,5 @@
 import * as esbuild from "esbuild";
+import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -26,5 +27,11 @@ await esbuild.build({
   tsconfig: path.join(root, "tsconfig.json"),
   sourcemap: true,
 });
+
+// Copy the standalone Vosk worker (runs on system Node, not Electron).
+fs.copyFileSync(
+  path.join(root, "services/speech/vosk-worker.cjs"),
+  path.join(root, "dist-electron/vosk-worker.cjs")
+);
 
 console.log("Electron build complete.");

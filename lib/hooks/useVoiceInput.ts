@@ -11,8 +11,10 @@ interface UseVoiceInputOptions {
 function floatToInt16(samples: Float32Array): Int16Array {
   const out = new Int16Array(samples.length);
   for (let i = 0; i < samples.length; i++) {
+    // Clamp to [-1, 1] range first
     const s = Math.max(-1, Math.min(1, samples[i]));
-    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    // Convert to 16-bit signed integer
+    out[i] = s < 0 ? Math.floor(s * 0x8000) : Math.floor(s * 0x7fff);
   }
   return out;
 }
@@ -73,18 +75,48 @@ export function useVoiceInput({ onResult, onError, onProgress }: UseVoiceInputOp
       onProgress?.("Understanding what you said…");
 
       try {
-        const buffer = new Uint8Array(pcm).buffer;
-        const result = await api.transcribePcm(buffer);
+        // Send a plain ArrayBuffer over IPC (no Buffer dependency in renderer).
+        const arrayBuffer = pcm.buffer.slice(
+          pcm.byteOffset,
+          pcm.byteOffset + pcm.byteLength
+        ) as ArrayBuffer;
+
+        if (arrayBuffer.byteLength < 3200) {
+          onError?.("Recording too short. Speak for at least 2 seconds.");
+          return;
+        }
+
+        console.log(
+          `[Voice] Sending ${arrayBuffer.byteLength} bytes (~${(arrayBuffer.byteLength / 32000).toFixed(1)}s) to speech engine`
+        );
+
+        // Race between transcription and timeout
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error("Transcription timed out after 30 seconds")), 30000);
+        });
+
+        const result = await Promise.race([
+          api.transcribePcm(arrayBuffer),
+          timeoutPromise,
+        ]);
 
         if (result.error) {
+          console.error("[Voice] Transcription error:", result.error);
           onError?.(result.error);
-        } else if (result.text) {
-          onResult(result.text);
+        } else if (result.text && result.text.trim()) {
+          console.log("[Voice] Transcribed:", result.text);
+          onResult(result.text.trim());
         } else {
-          onError?.("No speech detected. Speak louder and try again.");
+          onError?.("No speech detected. Speak louder and closer to the mic, then try again.");
         }
       } catch (err) {
-        onError?.(err instanceof Error ? err.message : "Transcription failed");
+        const message = err instanceof Error ? err.message : "Transcription failed";
+        console.error("[Voice] Exception:", message);
+        if (message.includes("timeout")) {
+          onError?.("Speech recognition is taking too long. Try restarting the app.");
+        } else {
+          onError?.(message);
+        }
       } finally {
         setTranscribing(false);
         onProgress?.(null);
@@ -104,23 +136,36 @@ export function useVoiceInput({ onResult, onError, onProgress }: UseVoiceInputOp
     stopStream();
 
     if (frames.length === 0) {
-      onError?.("No audio captured. Allow microphone access and try again.");
+      onError?.("No audio captured. Check microphone permissions in system settings and try again.");
       return;
     }
 
     const total = frames.reduce((sum, f) => sum + f.length, 0);
+    
+    // Check for silent/empty audio (all values near zero)
     const merged = new Float32Array(total);
     let offset = 0;
+    let maxAmplitude = 0;
     for (const frame of frames) {
       merged.set(frame, offset);
+      for (let i = 0; i < frame.length; i++) {
+        const abs = Math.abs(frame[i]);
+        if (abs > maxAmplitude) maxAmplitude = abs;
+      }
       offset += frame.length;
+    }
+
+    // If audio is too quiet (max amplitude < 0.01), likely no speech
+    if (maxAmplitude < 0.01) {
+      onError?.("Audio too quiet. Speak louder and closer to your microphone.");
+      return;
     }
 
     const pcm = resampleTo16k(merged, rate);
 
-    // ~0.4s minimum at 16kHz
-    if (pcm.length < 6400) {
-      onError?.("Too short. Click mic, speak clearly for 2 seconds, click mic again.");
+    // ~0.5s minimum at 16kHz for better accuracy
+    if (pcm.length < 8000) {
+      onError?.("Recording too short. Speak for at least 2-3 seconds, then click mic again.");
       return;
     }
 

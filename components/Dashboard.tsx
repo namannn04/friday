@@ -41,11 +41,15 @@ export function Dashboard() {
   const sayAloud = useCallback(async (text: string) => {
     const s = settingsRef.current;
     if (!text || s?.voiceEnabled === false) return;
+    
     setIsSpeaking(true);
     try {
       await speakResponse(text, s);
-    } finally {
-      setTimeout(() => setIsSpeaking(false), 500);
+      // Keep indicator for a bit after speech starts
+      setTimeout(() => setIsSpeaking(false), 1000);
+    } catch (error) {
+      console.error("[TTS]", error);
+      setIsSpeaking(false);
     }
   }, []);
 
@@ -87,10 +91,15 @@ export function Dashboard() {
 
       const toSpeak = res.speakMessage || res.finalMessage;
       if (res.voiceSpoken) {
+        // Main process already spoke - show indicator for ~4 seconds
         setIsSpeaking(true);
-        setTimeout(() => setIsSpeaking(false), 3000);
-      } else if (toSpeak && res.status !== "clarification") {
+        setTimeout(() => setIsSpeaking(false), 4000);
+      } else if (toSpeak && res.status !== "clarification" && !window.electronAPI) {
+        // Fallback for browser mode (not Electron)
         void sayAloud(toSpeak);
+      } else if (toSpeak && res.status === "error" && !res.voiceSpoken) {
+        // Errors might not have been spoken by main process - speak them
+        void sayAloud("Sorry, something went wrong.");
       }
     },
     [refreshMeta, sayAloud]
@@ -162,15 +171,27 @@ export function Dashboard() {
   const handleVoiceError = useCallback(
     (err: string) => {
       setVoiceProgress(null);
+      const userMessage = err.includes("microphone")
+        ? err
+        : err.includes("timeout")
+        ? "Speech recognition timed out. Try restarting the app."
+        : err.includes("too short") || err.includes("too quiet")
+        ? err
+        : `Voice input error: ${err}`;
+      
       setResponse({
         id: "voice-error",
         command: "",
-        finalMessage: `Voice error: ${err}`,
+        finalMessage: userMessage,
         requiresConfirmation: false,
         status: "error",
         error: err,
       });
-      void sayAloud("Sorry, I couldn't hear that. Please try again.");
+      
+      // Only speak if not a microphone permission issue (which prevents audio anyway)
+      if (!err.includes("blocked") && !err.includes("permission")) {
+        void sayAloud("Sorry, I couldn't understand that. Please try again.");
+      }
     },
     [sayAloud]
   );
@@ -261,26 +282,39 @@ export function Dashboard() {
               </form>
             </div>
 
-            {voiceProgress && (
-              <p className="mt-2 text-xs text-cyan-400">{voiceProgress}</p>
-            )}
+            <div className="mt-2 min-h-[20px]">
+              {voiceProgress && (
+                <p className="text-xs text-cyan-400">{voiceProgress}</p>
+              )}
 
-            {voice.recording && (
-              <p className="mt-2 text-xs text-amber-300">
-                ● Listening… speak naturally, then click mic again.
-              </p>
-            )}
+              {voice.recording && (
+                <p className="flex items-center gap-2 text-xs text-amber-300">
+                  <span className="h-2 w-2 animate-pulse rounded-full bg-amber-400" />
+                  Listening… speak naturally, then click mic again.
+                </p>
+              )}
 
-            {voice.transcribing && (
-              <p className="mt-2 text-xs text-cyan-300">Thinking…</p>
-            )}
+              {voice.transcribing && (
+                <p className="flex items-center gap-2 text-xs text-cyan-300">
+                  <span className="h-2 w-2 animate-spin rounded-full border border-cyan-300 border-t-transparent" />
+                  Understanding what you said…
+                </p>
+              )}
 
-            {isSpeaking && (
-              <p className="mt-2 flex items-center gap-2 text-xs text-emerald-400">
-                <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-400" />
-                FRIDAY is speaking…
-              </p>
-            )}
+              {isSpeaking && (
+                <p className="flex items-center gap-2 text-xs text-emerald-400">
+                  <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-400" />
+                  FRIDAY is speaking…
+                </p>
+              )}
+
+              {loading && !voice.transcribing && !isSpeaking && (
+                <p className="flex items-center gap-2 text-xs text-cyan-300">
+                  <span className="h-2 w-2 animate-spin rounded-full border border-cyan-300 border-t-transparent" />
+                  Processing your request…
+                </p>
+              )}
+            </div>
 
             {isElectron && (
               <p className="mt-2 text-xs text-slate-500">
